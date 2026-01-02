@@ -13,5 +13,4 @@
 # limitations under the License.
 # ==============================================================================
 
-from . import go1  # noqa: F401 register envs
-from . import go2
+from . import walk_np  # noqa: F401 register envs
