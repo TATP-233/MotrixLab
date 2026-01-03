@@ -1,0 +1,157 @@
+# Copyright (C) 2020-2025 Motphys Technology Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+from dataclasses import dataclass, field
+
+import gymnasium as gym
+import motrixsim as mtx
+import numpy as np
+
+from motrix_envs import registry
+from motrix_envs.locomotion.go2.cfg import Go2WalkNpEnvCfg
+from motrix_envs.locomotion.go2.walk_np import Go2WalkTask
+from motrix_envs.mujoco_bridge import MjMxBridge
+
+def print_lidar_note():
+    print("Visit https://github.com/TATP-233/MuJoCo-LiDAR for installation instructions.")
+    print("\nInstallation steps:")
+    print("  git clone https://github.com/TATP-233/MuJoCo-LiDAR.git")
+    print("  cd MuJoCo-LiDAR")
+    print("  pip install -e \".[jax]\"")
+    print("\nVerify JAX installation:")
+    print("  python -c \"import jax; print(jax.default_backend())\"")
+    print("  (Should print 'gpu')")
+
+    print("\nNote: ")
+    print("(1) 这一版的 batch-mujoco-lidar 仅支持使用 JAX 后端")
+    print("(2) Batch-JAX 后端目前只支持基础几何体，包括：")
+    print("    - PLANE : 平面")
+    print("    - SPHERE : 球体")
+    print("    - CAPSULE : 胶囊体")
+    print("    - ELLIPSOID : 椭球体")
+    print("    - CYLINDER  : 圆柱体")
+    print("    - BOX : 长方体")
+    print("    不支持网格面片（MESH），也不支持Height Field")
+    print("(3) motrixsim 目前没有batch_array的geom_pos和geom_mat接口，因此不支持动态修改场景，需要一开始通过 MjMxBridge.forward() 计算初始的geom_xpos和geom_xmat（很快会支持）")
+
+    print("\nExample code:")
+    print("使用 Go2 机器人进行 LiDAR 扫描的示例代码：")
+    print("    https://github.com/TATP-233/motrixsim-docs/blob/dev/lidar/examples/go2_lidar.py")
+    print("使用批量 LiDAR 进行扫描的示例代码：")
+    print("    https://github.com/TATP-233/motrixsim-docs/blob/dev/lidar/examples/batch_lidar.py")
+
+print_lidar_note()
+
+try:
+    import jax
+    import jax.numpy as jnp
+    from mujoco_lidar import scan_gen
+    from mujoco_lidar.core_jax import MjLidarJax
+except ImportError:
+    print("[ERROR] mujoco_lidar package not found. Please install mujoco-lidar[jax] to run this example.")
+    print_lidar_note()
+    exit(0)
+
+@registry.envcfg("go2-flat-terrain-lidar-walk")
+@dataclass
+class Go2LidarWalkNpEnvCfg(Go2WalkNpEnvCfg):
+    lidartype: str = "mid360"
+    downsample: int = 1
+    dynamic_lidar: bool = False
+
+@registry.env("go2-flat-terrain-lidar-walk", sim_backend="np")
+class Go2WalkLidarTask(Go2WalkTask):
+    def __init__(self, cfg: Go2LidarWalkNpEnvCfg, num_envs=1):
+        super().__init__(cfg, num_envs)
+
+        self.bridge = MjMxBridge(cfg.model_file)
+        self.bridge.forward()
+        self.lidar_wrapper = MjLidarJax(
+            self.bridge.mj_model,
+            geomgroup=np.array([1, 1, 1, 0, 0, 0], dtype=np.ubyte),
+            bodyexclude=self.bridge.mj_model.body("base").id
+        )
+
+        self.lidar_site = self.model.get_site("lidar")
+        self.dynamic_lidar = cfg.dynamic_lidar
+        self.downsample = cfg.downsample
+        self.geom_xpos_batch_jax = jnp.repeat(jnp.expand_dims(jnp.array(self.bridge.mj_data.geom_xpos), axis=0), self.num_envs, axis=0)
+        self.geom_xmat_batch_jax = jnp.repeat(jnp.expand_dims(jnp.array(self.bridge.mj_data.geom_xmat), axis=0), self.num_envs, axis=0)
+
+        if cfg.lidartype in {"avia", "mid40", "mid70", "mid360", "tele"}:
+            self.livox_generator = scan_gen.LivoxGenerator(cfg.lidartype)
+            self.rays_theta, self.rays_phi = self.livox_generator.sample_ray_angles()
+            self.use_livox_lidar = True
+        elif cfg.lidartype == "airy":
+            self.rays_theta, self.rays_phi = scan_gen.generate_airy96()
+        elif cfg.lidartype == "HDL64":
+            self.rays_theta, self.rays_phi = scan_gen.generate_HDL64()
+        elif cfg.lidartype == "vlp32":
+            self.rays_theta, self.rays_phi = scan_gen.generate_vlp32()
+        elif cfg.lidartype == "os128":
+            self.rays_theta, self.rays_phi = scan_gen.generate_os128()
+        elif cfg.lidartype == "custom":
+            self.rays_theta, self.rays_phi = scan_gen.generate_grid_scan_pattern(360, 64, phi_range=(0., np.pi/2.))
+        else:
+            raise ValueError(f"不支持的LiDAR型号: {cfg.lidartype}")
+        if self.downsample > 1:
+            self.rays_theta = self.rays_theta[::self.downsample]
+            self.rays_phi = self.rays_phi[::self.downsample]
+        self.rays_theta = jnp.array(np.ascontiguousarray(self.rays_theta).astype(np.float32))
+        self.rays_phi = jnp.array(np.ascontiguousarray(self.rays_phi).astype(np.float32))
+
+    def get_lidar_scan(self, data: mtx.SceneData) -> jnp.ndarray:
+        """
+        获取当前环境中所有机器人的LiDAR扫描数据
+        Args:
+            data (mtx.SceneData): 当前场景数据
+        Returns:
+            distances (jnp.ndarray): 形状为 (num_envs, num_rays) 的LiDAR距离数据
+            local_rays_batch (jnp.ndarray): 形状为 (num_envs, num_rays, 3) 的局部射线方向数据
+        """
+        if self.dynamic_lidar:
+            self.rays_theta, self.rays_phi = self.livox_generator.sample_ray_angles(downsample=self.downsample)
+        distances, local_rays_batch = self.lidar_wrapper.trace_rays_batch(
+            self.geom_xpos_batch_jax,
+            self.geom_xmat_batch_jax,
+            self.lidar_site.get_position(data),
+            self.lidar_site.get_rotation_mat(data),
+            self.rays_theta,
+            self.rays_phi
+        )
+
+        # batch_size = self.num_envs
+        # num_rays = self.rays_theta.shape[0]
+
+        # local_points = local_rays_batch * distances[..., jnp.newaxis]
+        # world_points = jnp.einsum('bij,bkj->bki', self.lidar_site.get_rotation_mat(data), local_points) + self.lidar_site.get_position(data)[:, jnp.newaxis, :]
+
+        # assert distances.shape == (batch_size, num_rays), f"Expected distances shape {(batch_size, num_rays)}, but got {distances.shape}"
+        # assert local_rays_batch.shape == (batch_size, num_rays, 3), f"Expected local_rays_batch shape {(batch_size, num_rays, 3)}, but got {local_rays_batch.shape}"
+        # assert local_points.shape == (batch_size, num_rays, 3), f"Expected local_points shape {(batch_size, num_rays, 3)}, but got {local_points.shape}"
+        # assert world_points.shape == (batch_size, num_rays, 3), f"Expected world_points shape {(batch_size, num_rays, 3)}, but got {world_points.shape}"
+
+        return distances, local_rays_batch
+
+    def _get_obs(self, data: mtx.SceneData, info: dict) -> np.ndarray:
+        raw_obs = super()._get_obs(data, info)
+        lidar_points = self.get_lidar_scan(data)
+        obs = {
+            "lidar_points": np.array(lidar_points),
+            "state_obs" : raw_obs,
+        }
+        return obs
+    
+
