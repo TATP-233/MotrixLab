@@ -39,12 +39,13 @@ def print_lidar_note():
     print("(1) 这一版的 batch-mujoco-lidar 仅支持使用 JAX 后端")
     print("(2) Batch-JAX 后端目前只支持基础几何体，包括：")
     print("    - PLANE : 平面")
+    print("    - HFIELD : 高场")
     print("    - SPHERE : 球体")
     print("    - CAPSULE : 胶囊体")
     print("    - ELLIPSOID : 椭球体")
     print("    - CYLINDER  : 圆柱体")
     print("    - BOX : 长方体")
-    print("    不支持网格面片（MESH），也不支持Height Field")
+    print("    不支持网格面片（MESH）")
     print("(3) motrixsim 目前没有batch_array的geom_pos和geom_mat接口，因此不支持动态修改场景，需要一开始通过 MjMxBridge.forward() 计算初始的geom_xpos和geom_xmat（很快会支持）")
 
     print("\nExample code:")
@@ -60,6 +61,8 @@ try:
     import jax.numpy as jnp
     from mujoco_lidar import scan_gen
     from mujoco_lidar.core_jax import MjLidarJax
+    assert mujoco_lidar.__version__ >= "0.2.3", "Please upgrade mujoco-lidar to version 0.2.3 or higher."
+
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3" # 如果显存充足，可以调大一些
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
