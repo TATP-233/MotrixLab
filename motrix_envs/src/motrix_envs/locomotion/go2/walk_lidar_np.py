@@ -57,11 +57,21 @@ def print_lidar_note():
 print_lidar_note()
 
 try:
-    import jax
-    import jax.numpy as jnp
-    from mujoco_lidar import scan_gen
-    from mujoco_lidar.core_jax import MjLidarJax
-    assert mujoco_lidar.__version__ >= "0.2.3", "Please upgrade mujoco-lidar to version 0.2.3 or higher."
+
+    backend = os.environ.get("LIDAR_BACKEND", "jax")
+    import mujoco_lidar
+    if backend == "jax":
+        assert mujoco_lidar.__version__ >= "0.2.3", "Please upgrade mujoco-lidar to version 0.2.3 or higher."
+        import jax
+        import jax.numpy as jnp
+        from mujoco_lidar import scan_gen
+        from mujoco_lidar.core_jax import MjLidarJax
+    elif backend == "taichi":
+        assert mujoco_lidar.__version__ >= "0.2.5", "Please upgrade mujoco-lidar to version 0.2.3 or higher."
+        import taichi as ti
+        if not hasattr(ti, '_is_initialized') or not ti._is_initialized:
+            ti.init(arch=ti.gpu)
+        from mujoco_lidar.core_ti import MjLidarTi
 
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3" # 如果显存充足，可以调大一些
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -85,11 +95,24 @@ class Go2WalkLidarTask(Go2WalkTask):
 
         self.bridge = MjMxBridge(cfg.model_file)
         self.bridge.forward()
-        self.lidar_wrapper = MjLidarJax(
-            self.bridge.mj_model,
-            geomgroup=np.array([1, 1, 1, 0, 0, 0], dtype=np.ubyte),
-            bodyexclude=self.bridge.mj_model.body("base").id
-        )
+
+        # 注意，这里的 geomgroup 设置为只检测group=2的几何体，在xml中设置地形环境的group=2，忽略机器人本体的碰撞几何体
+        geomgroup = np.array([0, 0, 1, 0, 0, 0], dtype=np.ubyte)
+        if backend == "jax":
+            self.lidar_wrapper = MjLidarJax(
+                self.bridge.mj_model,
+                geomgroup=geomgroup,
+                bodyexclude=self.bridge.mj_model.body("base").id
+            )
+        elif backend == "taichi":
+            self.lidar_wrapper = MjLidarTi(
+                self.bridge.mj_model,
+                geomgroup=geomgroup,
+                bodyexclude=self.bridge.mj_model.body("base").id,
+                max_candidates=64
+            )
+            # Important: must call update to sync the mj_data before tracing rays at first time
+            self.lidar_wrapper.update(self.bridge.mj_data)
 
         self.lidar_site = self.model.get_site("lidar")
         self.dynamic_lidar = cfg.dynamic_lidar
@@ -130,19 +153,29 @@ class Go2WalkLidarTask(Go2WalkTask):
         """
         if self.dynamic_lidar:
             self.rays_theta, self.rays_phi = self.livox_generator.sample_ray_angles(downsample=self.downsample)
-        distances, local_rays_batch = self.lidar_wrapper.trace_rays_batch(
-            self.geom_xpos_batch_jax,
-            self.geom_xmat_batch_jax,
-            self.lidar_site.get_position(data),
-            self.lidar_site.get_rotation_mat(data),
-            self.rays_theta,
-            self.rays_phi
-        )
+
+        if backend == "jax":
+            distances, local_rays_batch = self.lidar_wrapper.trace_rays_batch(
+                self.geom_xpos_batch_jax,
+                self.geom_xmat_batch_jax,
+                self.lidar_site.get_position(data),
+                self.lidar_site.get_rotation_mat(data),
+                self.rays_theta,
+                self.rays_phi
+            )
+            local_points = local_rays_batch * distances[..., jnp.newaxis]
+        elif backend == "taichi":
+            distances_ti, local_points_ti = self.lidar_wrapper.trace_rays_batch(
+                self.lidar_site.get_position(data),
+                self.lidar_site.get_rotation_mat(data),
+                self.rays_theta,
+                self.rays_phi
+            )
+            distances = distances_ti.to_numpy()
+            local_points = local_points_ti.to_numpy()
 
         # batch_size = self.num_envs
         # num_rays = self.rays_theta.shape[0]
-
-        # local_points = local_rays_batch * distances[..., jnp.newaxis]
         # world_points = jnp.einsum('bij,bkj->bki', self.lidar_site.get_rotation_mat(data), local_points) + self.lidar_site.get_position(data)[:, jnp.newaxis, :]
 
         # assert distances.shape == (batch_size, num_rays), f"Expected distances shape {(batch_size, num_rays)}, but got {distances.shape}"
@@ -150,7 +183,7 @@ class Go2WalkLidarTask(Go2WalkTask):
         # assert local_points.shape == (batch_size, num_rays, 3), f"Expected local_points shape {(batch_size, num_rays, 3)}, but got {local_points.shape}"
         # assert world_points.shape == (batch_size, num_rays, 3), f"Expected world_points shape {(batch_size, num_rays, 3)}, but got {world_points.shape}"
 
-        return distances, local_rays_batch
+        return distances, local_points
 
     def _get_obs(self, data: mtx.SceneData, info: dict) -> np.ndarray:
         raw_obs = super()._get_obs(data, info)
