@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
+import os
 from dataclasses import dataclass, field
 
 import gymnasium as gym
@@ -59,6 +60,9 @@ try:
     import jax.numpy as jnp
     from mujoco_lidar import scan_gen
     from mujoco_lidar.core_jax import MjLidarJax
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3" # 如果显存充足，可以调大一些
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 except ImportError:
     print("[ERROR] mujoco_lidar package not found. Please install mujoco-lidar[jax] to run this example.")
     print_lidar_note()
