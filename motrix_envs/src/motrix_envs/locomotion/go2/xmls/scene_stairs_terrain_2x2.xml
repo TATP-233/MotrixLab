@@ -11,7 +11,7 @@
   </visual>
 
   <asset>
-    <hfield name="hfield" file="assets/heightmap_stairs.png" size="22.5 22.5 3 4" />
+    <hfield name="hfield" file="assets/heightmap_stairs_2x2.png" size="22.5 22.5 3 4" />
   </asset>
 
   <worldbody>
@@ -23,7 +23,7 @@
   <keyframe>
     <key name="home"
       qpos="
-      0 0 0.89
+      0 0 -0.12
       1 0 0 0
       0.1 0.9 -1.8
       -0.1 0.9 -1.8
